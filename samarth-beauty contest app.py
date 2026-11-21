@@ -12,6 +12,10 @@ import requests
 import streamlit as st
 
 APP_NAME = "Beauty Contest"
+
+# Apps Script web app URL (ends with /exec)
+API_URL = "https://script.google.com/macros/s/REPLACE_WITH_YOUR_/exec"
+
 K_FACTOR = 2 / 3
 ALLOWED_MIN, ALLOWED_MAX = 0, 100
 MIN_DT = datetime.min.replace(tzinfo=timezone.utc)
@@ -53,23 +57,6 @@ def to_csv_bytes(rows, fieldnames) -> bytes:
     for r in rows:
         wr.writerow({k: r.get(k, "") for k in fieldnames})
     return buf.getvalue().encode("utf-8")
-
-
-def default_api() -> str:
-    """API URL from Streamlit secrets (API_URL) or ?api= query param, else empty."""
-    try:
-        val = st.secrets.get("API_URL", "")
-        if val:
-            return str(val).strip()
-    except Exception:
-        pass
-    try:
-        val = st.query_params.get("api", "")
-        if val:
-            return str(val).strip()
-    except Exception:
-        pass
-    return ""
 
 
 # ----------------------------------------------------------------------------
@@ -197,14 +184,6 @@ def results_txt(res) -> str:
 st.set_page_config(page_title=APP_NAME, page_icon="🎯", layout="centered")
 st.title(APP_NAME)
 
-with st.sidebar:
-    st.header("Settings")
-    api = st.text_input("API URL (ends with /exec)", value=default_api()).strip()
-
-api_ok = api.startswith("http")
-if not api_ok:
-    st.warning("Paste the API URL (ends with /exec) in the sidebar to start.")
-
 tab_commit, tab_reveal, tab_results = st.tabs(["Commit", "Reveal", "Results"])
 
 # ---------------------------- COMMIT ----------------------------
@@ -222,9 +201,7 @@ with tab_commit:
 
     if c_submit:
         uid, nonce = c_uid.strip(), c_nonce.strip()
-        if not api_ok:
-            st.error("API URL missing.")
-        elif not uid:
+        if not uid:
             st.error("University ID cannot be empty.")
         elif not nonce:
             st.error("Nonce cannot be empty.")
@@ -235,7 +212,7 @@ with tab_commit:
             st.code(commit_hash)
             st.write("**Preimage (write this down):**")
             st.code(preimage)
-            status, text = post_json(api, {"kind": "commit", "uni_id": uid,
+            status, text = post_json(API_URL, {"kind": "commit", "uni_id": uid,
                                            "commit": commit_hash})
             if status is not None and status < 400:
                 st.success(f"Server: {status} {text}")
@@ -256,14 +233,12 @@ with tab_reveal:
 
     if r_submit:
         uid, nonce = r_uid.strip(), r_nonce.strip()
-        if not api_ok:
-            st.error("API URL missing.")
-        elif not uid:
+        if not uid:
             st.error("University ID cannot be empty.")
         elif not nonce:
             st.error("Nonce cannot be empty.")
         else:
-            status, text = post_json(api, {"kind": "reveal", "uni_id": uid,
+            status, text = post_json(API_URL, {"kind": "reveal", "uni_id": uid,
                                            "number": int(r_num), "nonce": nonce})
             if status is not None and status < 400:
                 st.success(f"Server: {status} {text}")
@@ -276,14 +251,11 @@ with tab_results:
     st.write(f"Target = {K_FACTOR:.4f} × class average. Winner(s): minimal distance to target.")
 
     if st.button("Compute results"):
-        if not api_ok:
-            st.error("API URL missing.")
-        else:
-            try:
-                st.session_state["res"] = run_consensus(api)
-            except Exception as e:
-                st.session_state.pop("res", None)
-                st.error(f"Could not fetch/compute results: {e}")
+        try:
+            st.session_state["res"] = run_consensus(API_URL)
+        except Exception as e:
+            st.session_state.pop("res", None)
+            st.error(f"Could not fetch/compute results: {e}")
 
     res = st.session_state.get("res")
     if res:
