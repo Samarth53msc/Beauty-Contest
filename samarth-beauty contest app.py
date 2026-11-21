@@ -11,26 +11,9 @@ import pandas as pd
 import requests
 import streamlit as st
 
-# ----------------------------------------------------------------------------
-# Configuration
-# ----------------------------------------------------------------------------
 APP_NAME = "Beauty Contest"
-
-# Set API_URL in Streamlit secrets (Settings > Secrets) or edit the default below.
-API_DEFAULT = "https://script.google.com/macros/s/REPLACE_WITH_YOUR_/exec"
-try:
-    API_DEFAULT = st.secrets.get("API_URL", API_DEFAULT)
-except Exception:
-    pass
-
 K_FACTOR = 2 / 3
 ALLOWED_MIN, ALLOWED_MAX = 0, 100
-
-# Commit closes 15 Nov 2026 23:59:59 Paris (UTC+1) == 22:59:59 UTC
-COMMIT_DEADLINE_UTC = datetime(2026, 11, 15, 22, 59, 59, tzinfo=timezone.utc)
-# Reveal opens 16 Nov 2026 00:00:00 Paris == 23:00:00 UTC on 15 Nov
-REVEAL_OPEN_UTC = datetime(2026, 11, 15, 23, 0, 0, tzinfo=timezone.utc)
-
 MIN_DT = datetime.min.replace(tzinfo=timezone.utc)
 
 
@@ -39,10 +22,6 @@ MIN_DT = datetime.min.replace(tzinfo=timezone.utc)
 # ----------------------------------------------------------------------------
 def sha256(s: str) -> str:
     return hashlib.sha256(s.encode("utf-8")).hexdigest()
-
-
-def now_utc() -> datetime:
-    return datetime.now(timezone.utc)
 
 
 def parse_ts(ts: str):
@@ -74,6 +53,23 @@ def to_csv_bytes(rows, fieldnames) -> bytes:
     for r in rows:
         wr.writerow({k: r.get(k, "") for k in fieldnames})
     return buf.getvalue().encode("utf-8")
+
+
+def default_api() -> str:
+    """API URL from Streamlit secrets (API_URL) or ?api= query param, else empty."""
+    try:
+        val = st.secrets.get("API_URL", "")
+        if val:
+            return str(val).strip()
+    except Exception:
+        pass
+    try:
+        val = st.query_params.get("api", "")
+        if val:
+            return str(val).strip()
+    except Exception:
+        pass
+    return ""
 
 
 # ----------------------------------------------------------------------------
@@ -203,10 +199,11 @@ st.title(APP_NAME)
 
 with st.sidebar:
     st.header("Settings")
-    api = st.text_input("API URL (ends with /exec)", value=API_DEFAULT).strip()
-    st.caption(f"Commit closes: 15 Nov 2026 23:59:59 Paris (22:59:59 UTC)")
-    st.caption(f"Reveal opens: 16 Nov 2026 00:00:00 Paris (23:00:00 UTC)")
-    st.caption(f"Now (UTC): {now_utc():%Y-%m-%d %H:%M:%S}")
+    api = st.text_input("API URL (ends with /exec)", value=default_api()).strip()
+
+api_ok = api.startswith("http")
+if not api_ok:
+    st.warning("Paste the API URL (ends with /exec) in the sidebar to start.")
 
 tab_commit, tab_reveal, tab_results = st.tabs(["Commit", "Reveal", "Results"])
 
@@ -216,66 +213,62 @@ with tab_commit:
     st.write("Pick a number (0–100) and a secret nonce. Only the hash is submitted. "
              "Save the preimage: you need it to reveal.")
 
-    if now_utc() > COMMIT_DEADLINE_UTC:
-        st.error("⛔ Commit window is CLOSED (deadline: 15 Nov 2026 23:59:59 Paris).")
-    else:
-        with st.form("commit_form"):
-            c_uid = st.text_input("University ID")
-            c_num = st.number_input("Your number (0..100)", min_value=ALLOWED_MIN,
-                                    max_value=ALLOWED_MAX, value=0, step=1)
-            c_nonce = st.text_input("Secret nonce (keep it safe)")
-            c_submit = st.form_submit_button("Submit commit")
+    with st.form("commit_form"):
+        c_uid = st.text_input("University ID")
+        c_num = st.number_input("Your number (0..100)", min_value=ALLOWED_MIN,
+                                max_value=ALLOWED_MAX, value=0, step=1)
+        c_nonce = st.text_input("Secret nonce (keep it safe)")
+        c_submit = st.form_submit_button("Submit commit")
 
-        if c_submit:
-            uid, nonce = c_uid.strip(), c_nonce.strip()
-            if not uid:
-                st.error("University ID cannot be empty.")
-            elif not nonce:
-                st.error("Nonce cannot be empty.")
-            elif now_utc() > COMMIT_DEADLINE_UTC:
-                st.error("⛔ Commit window is CLOSED.")
+    if c_submit:
+        uid, nonce = c_uid.strip(), c_nonce.strip()
+        if not api_ok:
+            st.error("API URL missing.")
+        elif not uid:
+            st.error("University ID cannot be empty.")
+        elif not nonce:
+            st.error("Nonce cannot be empty.")
+        else:
+            preimage = f"{uid}|{int(c_num)}|{nonce}"
+            commit_hash = sha256(preimage)
+            st.write("**Commit hash:**")
+            st.code(commit_hash)
+            st.write("**Preimage (write this down):**")
+            st.code(preimage)
+            status, text = post_json(api, {"kind": "commit", "uni_id": uid,
+                                           "commit": commit_hash})
+            if status is not None and status < 400:
+                st.success(f"Server: {status} {text}")
             else:
-                preimage = f"{uid}|{int(c_num)}|{nonce}"
-                commit_hash = sha256(preimage)
-                st.write("**Commit hash:**")
-                st.code(commit_hash)
-                st.write("**Preimage (write this down):**")
-                st.code(preimage)
-                status, text = post_json(api, {"kind": "commit", "uni_id": uid,
-                                               "commit": commit_hash})
-                if status is not None and status < 400:
-                    st.success(f"Server: {status} {text}")
-                else:
-                    st.error(f"Server: {status} {text}")
+                st.error(f"Server: {status} {text}")
 
 # ---------------------------- REVEAL ----------------------------
 with tab_reveal:
     st.subheader("Reveal")
     st.write("Re-enter EXACTLY what you committed.")
 
-    if now_utc() < REVEAL_OPEN_UTC:
-        st.error("⛔ Reveal window is NOT open yet (opens 16 Nov 2026 00:00:00 Paris).")
-    else:
-        with st.form("reveal_form"):
-            r_uid = st.text_input("University ID", key="r_uid")
-            r_num = st.number_input("Your number (0..100)", min_value=ALLOWED_MIN,
-                                    max_value=ALLOWED_MAX, value=0, step=1, key="r_num")
-            r_nonce = st.text_input("Your secret nonce", key="r_nonce")
-            r_submit = st.form_submit_button("Submit reveal")
+    with st.form("reveal_form"):
+        r_uid = st.text_input("University ID", key="r_uid")
+        r_num = st.number_input("Your number (0..100)", min_value=ALLOWED_MIN,
+                                max_value=ALLOWED_MAX, value=0, step=1, key="r_num")
+        r_nonce = st.text_input("Your secret nonce", key="r_nonce")
+        r_submit = st.form_submit_button("Submit reveal")
 
-        if r_submit:
-            uid, nonce = r_uid.strip(), r_nonce.strip()
-            if not uid:
-                st.error("University ID cannot be empty.")
-            elif not nonce:
-                st.error("Nonce cannot be empty.")
+    if r_submit:
+        uid, nonce = r_uid.strip(), r_nonce.strip()
+        if not api_ok:
+            st.error("API URL missing.")
+        elif not uid:
+            st.error("University ID cannot be empty.")
+        elif not nonce:
+            st.error("Nonce cannot be empty.")
+        else:
+            status, text = post_json(api, {"kind": "reveal", "uni_id": uid,
+                                           "number": int(r_num), "nonce": nonce})
+            if status is not None and status < 400:
+                st.success(f"Server: {status} {text}")
             else:
-                status, text = post_json(api, {"kind": "reveal", "uni_id": uid,
-                                               "number": int(r_num), "nonce": nonce})
-                if status is not None and status < 400:
-                    st.success(f"Server: {status} {text}")
-                else:
-                    st.error(f"Server: {status} {text}")
+                st.error(f"Server: {status} {text}")
 
 # ---------------------------- RESULTS ----------------------------
 with tab_results:
@@ -283,11 +276,14 @@ with tab_results:
     st.write(f"Target = {K_FACTOR:.4f} × class average. Winner(s): minimal distance to target.")
 
     if st.button("Compute results"):
-        try:
-            st.session_state["res"] = run_consensus(api)
-        except Exception as e:
-            st.session_state.pop("res", None)
-            st.error(f"Could not fetch/compute results: {e}")
+        if not api_ok:
+            st.error("API URL missing.")
+        else:
+            try:
+                st.session_state["res"] = run_consensus(api)
+            except Exception as e:
+                st.session_state.pop("res", None)
+                st.error(f"Could not fetch/compute results: {e}")
 
     res = st.session_state.get("res")
     if res:
